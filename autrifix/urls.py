@@ -6,6 +6,7 @@ from django.views.generic import RedirectView
 from drf_spectacular.views import SpectacularAPIView, SpectacularRedocView, SpectacularSwaggerView
 
 urlpatterns = [
+    path("", RedirectView.as_view(url="/api/docs/", permanent=False)),
     path("admin/", admin.site.urls),
     path("api/v1/", include("autrifix.api_urls")),
     # OpenAPI 3 schema + UIs (drf-spectacular)
