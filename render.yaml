@@ -1,0 +1,61 @@
+# Render Blueprint for a standalone `autrifix-be` Git repo (file lives at repo root).
+# Docs: https://render.com/docs/blueprint-spec
+services:
+  - type: keyvalue
+    name: autrifix-redis
+    # Render Key Value requires an explicit inbound IP allow list.
+    # For simplest public connectivity (dev/staging), allow all IPv4.
+    # For stricter setups, replace with your office/home CIDRs, or use [] if you only need private-network access.
+    ipAllowList:
+      - source: 0.0.0.0/0
+        description: allow-all-ipv4
+
+  - type: web
+    name: autrifix-api
+    runtime: python
+    buildCommand: bash scripts/render-build.sh
+    preDeployCommand: python manage.py migrate --noinput
+    # Quote because `$PORT` is otherwise parsed as a YAML alias in many editors/linters.
+    startCommand: "daphne -b 0.0.0.0 -p $PORT autrifix.asgi:application"
+    envVars:
+      - key: DJANGO_SETTINGS_MODULE
+        value: autrifix.settings.production
+      - key: SECRET_KEY
+        generateValue: true
+      - key: ALLOWED_HOSTS
+        sync: false
+      - key: DATABASE_URL
+        fromDatabase:
+          name: autrifix-db
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: autrifix-redis
+          property: connectionString
+      - key: CHANNEL_REDIS_URL
+        fromService:
+          type: keyvalue
+          name: autrifix-redis
+          property: connectionString
+      - key: CELERY_BROKER_URL
+        fromService:
+          type: keyvalue
+          name: autrifix-redis
+          property: connectionString
+      - key: CELERY_RESULT_BACKEND
+        fromService:
+          type: keyvalue
+          name: autrifix-redis
+          property: connectionString
+      - key: REDIS_KEY_PREFIX
+        value: autrifix
+      - key: CORS_ALLOWED_ORIGINS
+        sync: false
+      - key: USE_TLS
+        value: "true"
+      - key: SECURE_SSL_REDIRECT
+        value: "true"
+
+databases:
+  - name: autrifix-db
