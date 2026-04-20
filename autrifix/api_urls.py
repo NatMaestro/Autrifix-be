@@ -1,6 +1,7 @@
 from django.urls import path
 
 from apps.accounts.views import (
+    GoogleAuthView,
     HealthView,
     LoginView,
     LogoutView,
@@ -39,6 +40,7 @@ urlpatterns = [
     path("auth/send-otp/", SendOTPView.as_view(), name="auth-send-otp"),
     path("auth/verify-otp/", VerifyOTPView.as_view(), name="auth-verify-otp"),
     path("auth/register/", RegisterView.as_view(), name="register"),
+    path("auth/google/", GoogleAuthView.as_view(), name="auth-google"),
     path("auth/login/", LoginView.as_view(), name="login"),
     path("auth/logout/", LogoutView.as_view(), name="logout"),
     path("auth/token/", TokenObtainPairAliasView.as_view(), name="token_obtain_pair"),

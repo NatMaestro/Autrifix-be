@@ -11,7 +11,7 @@ def normalize_phone(raw: str) -> str:
     Ghana local numbers starting with 0 are mapped to +233 (Accra / GH rollout default).
     """
     if not raw or not str(raw).strip():
-        raise ValueError("Phone number is required.")
+        raise ValueError("Enter a valid phone number (or sign in with your email).")
 
     s = str(raw).strip()
     # Keep + only at start, digits elsewhere

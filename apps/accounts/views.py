@@ -11,27 +11,60 @@ from rest_framework_simplejwt.views import TokenBlacklistView, TokenObtainPairVi
 from apps.accounts.models import User, UserRole
 from apps.accounts.otp_service import issue_otp, verify_otp as verify_otp_code
 from apps.accounts.phone import normalize_phone
-from apps.accounts.serializers import RegisterSerializer, SendOTPSerializer, UserSerializer, VerifyOTPSerializer
+from apps.accounts.serializers import (
+    GoogleAuthSerializer,
+    IdentifierTokenObtainPairSerializer,
+    RegisterSerializer,
+    SendOTPSerializer,
+    UserSerializer,
+    VerifyOTPSerializer,
+)
 from apps.accounts.sms import send_otp_sms
 
 logger = logging.getLogger(__name__)
+
+_LOGIN_REQ = inline_serializer(
+    name="LoginIdentifierRequest",
+    fields={
+        "identifier": serializers.CharField(
+            required=False,
+            allow_blank=True,
+            help_text="Email or E.164 phone (preferred single field)",
+        ),
+        "email": serializers.CharField(required=False, allow_blank=True, help_text="Optional alias of identifier"),
+        "phone": serializers.CharField(required=False, allow_blank=True, help_text="Optional alias of identifier"),
+        "password": serializers.CharField(),
+    },
+)
 
 
 @extend_schema(
     summary="Login (password)",
     description=(
-        "Authenticate with **username** = phone (E.164) and **password**. "
+        "Authenticate with **identifier** (email or E.164 phone) and **password**. "
+        "You may send **email** or **phone** instead of **identifier** if exactly one is non-empty. "
         "Returns JWT **access** and **refresh**."
     ),
+    request=_LOGIN_REQ,
     tags=["auth"],
 )
 class LoginView(TokenObtainPairView):
+    """Always use identifier-based serializer (not SimpleJWT default ``phone`` + password)."""
+
+    serializer_class = IdentifierTokenObtainPairSerializer
     throttle_scope = "auth"
+
+    def get_serializer_class(self):
+        return IdentifierTokenObtainPairSerializer
 
 
 @extend_schema(exclude=True)
 class TokenObtainPairAliasView(TokenObtainPairView):
+    serializer_class = IdentifierTokenObtainPairSerializer
     throttle_scope = "auth"
+
+    def get_serializer_class(self):
+        return IdentifierTokenObtainPairSerializer
 
 
 @extend_schema(
@@ -170,10 +203,121 @@ class VerifyOTPView(APIView):
         )
 
 
+_GOOGLE_REQ = inline_serializer(
+    name="GoogleAuthRequest",
+    fields={"id_token": serializers.CharField(help_text="Credential JWT from Google Identity Services")},
+)
+_GOOGLE_OK = inline_serializer(
+    name="GoogleAuthTokens",
+    fields={
+        "access": serializers.CharField(),
+        "refresh": serializers.CharField(),
+    },
+)
+
+
+@extend_schema(
+    summary="Sign in with Google",
+    description="Verify a Google **id_token** (GIS credential) and return JWT **access** / **refresh**.",
+    request=_GOOGLE_REQ,
+    responses={200: _GOOGLE_OK},
+    tags=["auth"],
+)
+class GoogleAuthView(APIView):
+    permission_classes = (permissions.AllowAny,)
+    throttle_scope = "auth"
+
+    def post(self, request):
+        client_id = getattr(settings, "GOOGLE_OAUTH_CLIENT_ID", "") or ""
+        if not client_id:
+            return Response(
+                {"detail": "Google sign-in is not configured on the server."},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        ser = GoogleAuthSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        raw = ser.validated_data["id_token"]
+        try:
+            from google.auth.transport import requests as google_requests
+            from google.oauth2 import id_token as google_id_token
+        except ImportError:
+            return Response(
+                {
+                    "detail": "Google auth dependency is missing. Install with: pip install google-auth "
+                    "(or pip install -r requirements.txt).",
+                },
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        try:
+            idinfo = google_id_token.verify_oauth2_token(raw, google_requests.Request(), client_id)
+        except ValueError:
+            return Response({"detail": "Invalid Google token."}, status=status.HTTP_400_BAD_REQUEST)
+
+        if idinfo.get("iss") not in ("accounts.google.com", "https://accounts.google.com"):
+            return Response({"detail": "Invalid token issuer."}, status=status.HTTP_400_BAD_REQUEST)
+
+        email = (idinfo.get("email") or "").strip().lower()
+        if not email:
+            return Response({"detail": "Google account has no email."}, status=status.HTTP_400_BAD_REQUEST)
+
+        verified = bool(idinfo.get("email_verified"))
+        user = User.objects.filter(email__iexact=email).first()
+        if user is None:
+            user = User.objects.create_user(
+                phone=None,
+                password=None,
+                email=email,
+                role=UserRole.DRIVER,
+                is_email_verified=verified,
+            )
+        elif verified and not user.is_email_verified:
+            user.is_email_verified = True
+            user.save(update_fields=["is_email_verified"])
+
+        refresh = RefreshToken.for_user(user)
+        return Response(
+            {"access": str(refresh.access_token), "refresh": str(refresh)},
+            status=status.HTTP_200_OK,
+        )
+
+
+_REG_REQ = inline_serializer(
+    name="RegisterEmailPhoneRequest",
+    fields={
+        "email": serializers.EmailField(),
+        "phone": serializers.CharField(help_text="E.164 or local GH number"),
+        "password": serializers.CharField(),
+        "password_confirm": serializers.CharField(),
+        "role": serializers.ChoiceField(choices=["driver", "mechanic"], required=False),
+    },
+)
+
+
+@extend_schema(
+    summary="Register (password)",
+    description=(
+        "Create an account with **email**, **phone**, and **password**. "
+        "Both email and phone are required; you can sign in later with either plus password. "
+        "Returns profile fields and JWT tokens."
+    ),
+    request=_REG_REQ,
+    tags=["auth"],
+)
 class RegisterView(generics.CreateAPIView):
     permission_classes = (permissions.AllowAny,)
     serializer_class = RegisterSerializer
     throttle_scope = "auth"
+
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        user = serializer.save()
+        refresh = RefreshToken.for_user(user)
+        data = UserSerializer(user, context={"request": request}).data
+        data["access"] = str(refresh.access_token)
+        data["refresh"] = str(refresh)
+        headers = self.get_success_headers(data)
+        return Response(data, status=status.HTTP_201_CREATED, headers=headers)
 
 
 class MeView(generics.RetrieveUpdateAPIView):

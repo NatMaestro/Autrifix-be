@@ -26,7 +26,7 @@ docker compose exec web python manage.py createsuperuser
 ```
 
 - API: `http://localhost:8000/api/v1/`
-- **Login**: `POST /api/v1/auth/login/` (JSON: `username` = email, `password`) → JWT `access` / `refresh`; **Logout**: `POST /api/v1/auth/logout/` with `{"refresh": "<refresh token>"}` (blacklists refresh)
+- **Register**: `POST /api/v1/auth/register/` (`email`, `phone`, `password`, `password_confirm`, optional `role`) → profile + JWT; **Login**: `POST /api/v1/auth/login/` (`identifier` = email or E.164 phone, `password`) → JWT; **Google**: `POST /api/v1/auth/google/` (`id_token`); **Logout**: `POST /api/v1/auth/logout/` with `{"refresh": "<refresh token>"}` (blacklists refresh)
 - **Swagger UI**: `http://localhost:8000/api/docs/` (alias: `/swagger/`)
 - **ReDoc**: `http://localhost:8000/api/redoc/`
 - **OpenAPI JSON**: `http://localhost:8000/api/schema/` (add `?format=json` or `Accept: application/json`)

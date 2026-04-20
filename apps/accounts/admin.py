@@ -6,7 +6,7 @@ from .models import PhoneOTP, User
 
 @admin.register(User)
 class UserAdmin(BaseUserAdmin):
-    ordering = ("phone",)
+    ordering = ("-date_joined",)
     list_display = ("phone", "email", "role", "is_staff", "is_active", "date_joined")
     list_filter = ("role", "is_staff", "is_active")
     search_fields = ("phone", "email", "first_name", "last_name")

@@ -29,6 +29,7 @@ cloudinary==1.41.0
 # Utils
 Pillow==11.1.0
 python-json-logger==3.2.1
+google-auth==2.38.0
 
 # Dev
 gunicorn==23.0.0

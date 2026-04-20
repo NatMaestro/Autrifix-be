@@ -39,6 +39,9 @@ TERMII_SENDER_ID = env("TERMII_SENDER_ID", default="")
 TERMII_CHANNEL = env("TERMII_CHANNEL", default="generic")  # generic | dnd | whatsapp
 TERMII_SMS_TYPE = env("TERMII_SMS_TYPE", default="plain")
 
+# Google Sign-In (OAuth 2.0 client ID for Web — same value as NEXT_PUBLIC_GOOGLE_CLIENT_ID on the frontend)
+GOOGLE_OAUTH_CLIENT_ID = env("GOOGLE_OAUTH_CLIENT_ID", default="")
+
 _CLOUDINARY_APPS = []
 if env("CLOUDINARY_CLOUD_NAME", default=None):
     _CLOUDINARY_APPS = ["cloudinary_storage", "cloudinary"]
@@ -196,13 +199,16 @@ SIMPLE_JWT = {
     "ROTATE_REFRESH_TOKENS": True,
     "BLACKLIST_AFTER_ROTATION": True,
     "AUTH_HEADER_TYPES": ("Bearer",),
+    # Default JWT obtain serializer (USERNAME_FIELD=phone would otherwise require "phone" + "password").
+    "TOKEN_OBTAIN_SERIALIZER": "apps.accounts.serializers.IdentifierTokenObtainPairSerializer",
 }
 
 SPECTACULAR_SETTINGS = {
     "TITLE": "AutriFix API",
     "DESCRIPTION": "Roadside assistance marketplace: drivers, mechanics, real-time jobs. "
-    "Primary auth: `POST /api/v1/auth/send-otp` + `POST /api/v1/auth/verify-otp` (phone + SMS). "
-    "Optional password login: `POST /api/v1/auth/login/` with **username** = phone (E.164).",
+    "MVP auth: `POST /api/v1/auth/register/` with **email** + **phone** + **password**; `POST /api/v1/auth/login/` with **identifier** (email or E.164 phone) + **password**; "
+    "`POST /api/v1/auth/google/` with Google **id_token**. "
+    "Legacy SMS OTP endpoints remain for future use.",
     "VERSION": "1.0.0",
     "SERVE_INCLUDE_SCHEMA": False,
     "SCHEMA_PATH_PREFIX": "/api/v1",

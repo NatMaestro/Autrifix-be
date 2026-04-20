@@ -18,10 +18,14 @@ class UserManager(BaseUserManager):
     use_in_migrations = True
 
     def _create_user(self, phone, password, **extra_fields):
-        if not phone:
-            raise ValueError("Phone is required")
-        phone = str(phone).strip()
-        user = self.model(phone=phone, **extra_fields)
+        email = extra_fields.get("email")
+        if email in ("", None):
+            extra_fields["email"] = None
+        phone_clean = str(phone).strip() if phone is not None else ""
+        phone_val = phone_clean or None
+        if not phone_val and not extra_fields.get("email"):
+            raise ValueError("Either phone or email is required")
+        user = self.model(phone=phone_val, **extra_fields)
         if password:
             user.set_password(password)
         else:
@@ -29,7 +33,7 @@ class UserManager(BaseUserManager):
         user.save(using=self._db)
         return user
 
-    def create_user(self, phone, password=None, **extra_fields):
+    def create_user(self, phone=None, password=None, **extra_fields):
         extra_fields.setdefault("is_staff", False)
         extra_fields.setdefault("is_superuser", False)
         return self._create_user(phone, password, **extra_fields)
@@ -40,13 +44,22 @@ class UserManager(BaseUserManager):
         extra_fields.setdefault("role", UserRole.ADMIN)
         if extra_fields.get("email") in ("", None):
             extra_fields["email"] = None
+        if not phone:
+            raise ValueError("Superuser must have a phone set.")
         return self._create_user(phone, password, **extra_fields)
 
 
 class User(AbstractUser):
     username = None
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    phone = models.CharField(_("phone number"), max_length=20, unique=True, db_index=True)
+    phone = models.CharField(
+        _("phone number"),
+        max_length=20,
+        unique=True,
+        db_index=True,
+        blank=True,
+        null=True,
+    )
     email = models.EmailField(_("email address"), blank=True, null=True, unique=True)
     avatar = models.ImageField(upload_to="avatars/", blank=True, null=True)
     role = models.CharField(
@@ -66,9 +79,15 @@ class User(AbstractUser):
         ordering = ["-date_joined"]
         verbose_name = _("user")
         verbose_name_plural = _("users")
+        constraints = [
+            models.CheckConstraint(
+                check=models.Q(phone__isnull=False) | models.Q(email__isnull=False),
+                name="accounts_user_phone_or_email",
+            ),
+        ]
 
     def __str__(self):
-        return self.phone
+        return self.phone or self.email or str(self.pk)
 
     @property
     def is_driver(self) -> bool:
