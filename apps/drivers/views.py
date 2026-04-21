@@ -30,11 +30,11 @@ class VehicleListCreateView(generics.ListCreateAPIView):
     def get_queryset(self):
         if getattr(self, "swagger_fake_view", False):
             return Vehicle.objects.none()
-        profile = DriverProfile.objects.get(user=self.request.user)
+        profile = ensure_driver_profile(self.request.user)
         return Vehicle.objects.filter(driver=profile)
 
     def perform_create(self, serializer):
-        profile = DriverProfile.objects.get(user=self.request.user)
+        profile = ensure_driver_profile(self.request.user)
         serializer.save(driver=profile)
 
 
@@ -46,7 +46,7 @@ class VehicleDetailView(generics.RetrieveUpdateDestroyAPIView):
     def get_queryset(self):
         if getattr(self, "swagger_fake_view", False):
             return Vehicle.objects.none()
-        profile = DriverProfile.objects.get(user=self.request.user)
+        profile = ensure_driver_profile(self.request.user)
         return Vehicle.objects.filter(driver=profile)
 
 

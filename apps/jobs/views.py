@@ -24,6 +24,11 @@ from apps.mechanics.models import MechanicProfile, MechanicServiceOffering
 from apps.mechanics.nearby_presence import list_nearby_mechanic_previews
 
 
+def ensure_driver_profile(user):
+    profile, _ = DriverProfile.objects.get_or_create(user=user)
+    return profile
+
+
 @extend_schema(
     parameters=[
         OpenApiParameter("lat", OpenApiTypes.FLOAT, OpenApiParameter.QUERY, required=True),
@@ -99,11 +104,11 @@ class RequestCreateView(generics.CreateAPIView):
         ctx = super().get_serializer_context()
         if getattr(self, "swagger_fake_view", False):
             return ctx
-        ctx["driver_profile"] = DriverProfile.objects.get(user=self.request.user)
+        ctx["driver_profile"] = ensure_driver_profile(self.request.user)
         return ctx
 
     def perform_create(self, serializer):
-        profile = DriverProfile.objects.get(user=self.request.user)
+        profile = ensure_driver_profile(self.request.user)
         serializer.save(driver=profile)
 
 
@@ -203,18 +208,18 @@ class ServiceRequestListCreateView(generics.ListCreateAPIView):
     def get_queryset(self):
         if getattr(self, "swagger_fake_view", False):
             return ServiceRequest.objects.none()
-        profile = DriverProfile.objects.get(user=self.request.user)
+        profile = ensure_driver_profile(self.request.user)
         return ServiceRequest.objects.filter(driver=profile).select_related("category")
 
     def get_serializer_context(self):
         ctx = super().get_serializer_context()
         if getattr(self, "swagger_fake_view", False):
             return ctx
-        ctx["driver_profile"] = DriverProfile.objects.get(user=self.request.user)
+        ctx["driver_profile"] = ensure_driver_profile(self.request.user)
         return ctx
 
     def perform_create(self, serializer):
-        profile = DriverProfile.objects.get(user=self.request.user)
+        profile = ensure_driver_profile(self.request.user)
         serializer.save(driver=profile)
 
 
@@ -226,7 +231,7 @@ class ServiceRequestDetailView(generics.RetrieveUpdateAPIView):
     def get_queryset(self):
         if getattr(self, "swagger_fake_view", False):
             return ServiceRequest.objects.none()
-        profile = DriverProfile.objects.get(user=self.request.user)
+        profile = ensure_driver_profile(self.request.user)
         return ServiceRequest.objects.filter(driver=profile)
 
 

@@ -20,6 +20,7 @@ from apps.accounts.serializers import (
     VerifyOTPSerializer,
 )
 from apps.accounts.sms import send_otp_sms
+from apps.drivers.models import DriverProfile
 
 logger = logging.getLogger(__name__)
 
@@ -273,6 +274,9 @@ class GoogleAuthView(APIView):
         elif verified and not user.is_email_verified:
             user.is_email_verified = True
             user.save(update_fields=["is_email_verified"])
+
+        if user.role == UserRole.DRIVER:
+            DriverProfile.objects.get_or_create(user=user)
 
         refresh = RefreshToken.for_user(user)
         return Response(
