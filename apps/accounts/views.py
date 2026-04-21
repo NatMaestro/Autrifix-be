@@ -21,6 +21,7 @@ from apps.accounts.serializers import (
 )
 from apps.accounts.sms import send_otp_sms
 from apps.drivers.models import DriverProfile
+from apps.mechanics.models import MechanicProfile
 
 logger = logging.getLogger(__name__)
 
@@ -206,7 +207,10 @@ class VerifyOTPView(APIView):
 
 _GOOGLE_REQ = inline_serializer(
     name="GoogleAuthRequest",
-    fields={"id_token": serializers.CharField(help_text="Credential JWT from Google Identity Services")},
+    fields={
+        "id_token": serializers.CharField(help_text="Credential JWT from Google Identity Services"),
+        "role": serializers.ChoiceField(choices=["driver", "mechanic"], required=False),
+    },
 )
 _GOOGLE_OK = inline_serializer(
     name="GoogleAuthTokens",
@@ -238,6 +242,7 @@ class GoogleAuthView(APIView):
         ser = GoogleAuthSerializer(data=request.data)
         ser.is_valid(raise_exception=True)
         raw = ser.validated_data["id_token"]
+        selected_role = ser.validated_data.get("role") or UserRole.DRIVER
         try:
             from google.auth.transport import requests as google_requests
             from google.oauth2 import id_token as google_id_token
@@ -268,7 +273,7 @@ class GoogleAuthView(APIView):
                 phone=None,
                 password=None,
                 email=email,
-                role=UserRole.DRIVER,
+                role=selected_role,
                 is_email_verified=verified,
             )
         elif verified and not user.is_email_verified:
@@ -277,6 +282,11 @@ class GoogleAuthView(APIView):
 
         if user.role == UserRole.DRIVER:
             DriverProfile.objects.get_or_create(user=user)
+        elif user.role == UserRole.MECHANIC:
+            MechanicProfile.objects.get_or_create(
+                user=user,
+                defaults={"business_name": user.email or "AutriFix Mechanic"},
+            )
 
         refresh = RefreshToken.for_user(user)
         return Response(

@@ -114,6 +114,11 @@ class RegisterSerializer(serializers.Serializer):
 
 class GoogleAuthSerializer(serializers.Serializer):
     id_token = serializers.CharField()
+    role = serializers.ChoiceField(
+        choices=[UserRole.DRIVER, UserRole.MECHANIC],
+        required=False,
+        help_text="Optional role for first-time Google signup (driver or mechanic).",
+    )
 
 
 class UserSerializer(serializers.ModelSerializer):
