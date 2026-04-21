@@ -5,6 +5,16 @@ from apps.mechanics.models import MechanicProfile, MechanicServiceOffering
 
 
 class MechanicProfileSerializer(serializers.ModelSerializer):
+    def validate(self, attrs):
+        is_available = attrs.get("is_available", getattr(self.instance, "is_available", False))
+        base_latitude = attrs.get("base_latitude", getattr(self.instance, "base_latitude", None))
+        base_longitude = attrs.get("base_longitude", getattr(self.instance, "base_longitude", None))
+        if is_available and (base_latitude is None or base_longitude is None):
+            raise serializers.ValidationError(
+                {"is_available": "Set your workshop location before going online."}
+            )
+        return attrs
+
     class Meta:
         model = MechanicProfile
         fields = (
