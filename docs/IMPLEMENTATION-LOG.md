@@ -897,3 +897,32 @@ This is the only leg that exercises `select_for_update` — SQLite reports
 
 2. `DATABASE_URL` in `.env` points at **Neon**. Without an explicit override, `USE_POSTGRES_TESTS=1`
    would create and drop a test database on the hosted instance.
+
+
+---
+
+## CI was never able to run (2026-09-01)
+
+`.github/workflows/ci.yml` set `working-directory: autrifix-be` — a path that does not exist
+inside this repository's own checkout, because the root *is* the backend. The two projects sit
+in sibling directories locally but are **separate GitHub repositories**
+(`NatMaestro/Autrifix-be` and `NatMaestro/Autrifix-fe`). Every step would have failed before
+running.
+
+This predates the current work; it was inherited, not introduced. Found by tracing the
+workflow's working directories rather than by a failing run, since a workflow that fails at
+step one is easy to stop looking at.
+
+Removed. The matrix, the PostgreSQL service, and the coverage gate were all correct — only the
+path was wrong.
+
+### Verified against the real thing
+
+```
+USE_POSTGRES_TESTS=1 pytest --cov=apps --cov-fail-under=70
+  -> 424 passed, coverage 89.12%
+```
+
+424 rather than the 423 SQLite reports: `select_for_update` is a silent no-op on SQLite, so
+the concurrent-acceptance test only runs on this leg. That is the whole reason the PostgreSQL
+matrix entry exists.

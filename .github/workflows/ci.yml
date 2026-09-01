@@ -6,9 +6,10 @@ on:
   pull_request:
     branches: [main, master, develop]
 
-defaults:
-  run:
-    working-directory: autrifix-be
+# No `working-directory`: this repository's root *is* the backend. It previously set
+# `autrifix-be`, a path that does not exist inside its own checkout, so every step failed
+# before it ran. The two projects live in sibling directories locally but in separate
+# repositories on GitHub (Autrifix-be and Autrifix-fe).
 
 jobs:
   test:
