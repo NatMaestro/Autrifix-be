@@ -7,11 +7,26 @@ from django.db import models
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 
+from apps.core.validators import validate_image_size
+
 
 class UserRole(models.TextChoices):
-    DRIVER = "driver", _("Driver")
-    MECHANIC = "mechanic", _("Mechanic")
+    """Who someone is on the platform.
+
+    ``customer`` replaced ``driver`` on 2026-08-18: "driver" collided with rideshare apps
+    in signup copy, and became actively ambiguous once tow operators — who *are* drivers —
+    joined the platform. ``provider`` replaced ``mechanic`` so one role covers mechanics,
+    tow operators, and agencies; the specific trade lives on
+    ``ProviderProfile.provider_type``. See ADR-020.
+    """
+
+    CUSTOMER = "customer", _("Customer")
+    PROVIDER = "provider", _("Service provider")
     ADMIN = "admin", _("Admin")
+
+
+#: Roles a visitor may choose at signup. ``admin`` is never self-assignable.
+SIGNUP_ROLE_CHOICES = [choice for choice in UserRole.choices if choice[0] != UserRole.ADMIN]
 
 
 class UserManager(BaseUserManager):
@@ -61,14 +76,19 @@ class User(AbstractUser):
         null=True,
     )
     email = models.EmailField(_("email address"), blank=True, null=True, unique=True)
-    avatar = models.ImageField(upload_to="avatars/", blank=True, null=True)
+    avatar = models.ImageField(
+        upload_to="avatars/", blank=True, null=True, validators=[validate_image_size]
+    )
     role = models.CharField(
         max_length=20,
         choices=UserRole.choices,
-        default=UserRole.DRIVER,
+        default=UserRole.CUSTOMER,
         db_index=True,
     )
     is_email_verified = models.BooleanField(default=False)
+    #: Set by OTP confirmation. A precondition for provider verification (SPEC-013 REQ-5);
+    #: registration collects a phone but does not verify it.
+    is_phone_verified = models.BooleanField(default=False)
 
     USERNAME_FIELD = "phone"
     REQUIRED_FIELDS: list[str] = []
@@ -90,12 +110,12 @@ class User(AbstractUser):
         return self.phone or self.email or str(self.pk)
 
     @property
-    def is_driver(self) -> bool:
-        return self.role == UserRole.DRIVER
+    def is_customer(self) -> bool:
+        return self.role == UserRole.CUSTOMER
 
     @property
-    def is_mechanic(self) -> bool:
-        return self.role == UserRole.MECHANIC
+    def is_provider(self) -> bool:
+        return self.role == UserRole.PROVIDER
 
     @property
     def is_admin_role(self) -> bool:
@@ -127,22 +147,37 @@ class PhoneOTP(models.Model):
         return hashlib.sha256(msg).hexdigest()
 
     @classmethod
-    def verify_and_consume(cls, phone: str, code: str) -> bool:
-        now = timezone.now()
-        digest = cls.hash_code(phone, code.strip())
-        row = (
+    def _live_row(cls, phone: str, code: str):
+        return (
             cls.objects.filter(
                 phone=phone,
-                code_hash=digest,
+                code_hash=cls.hash_code(phone, code.strip()),
                 consumed_at__isnull=True,
-                expires_at__gt=now,
+                expires_at__gt=timezone.now(),
             )
             .order_by("-created_at")
             .first()
         )
+
+    @classmethod
+    def is_code_valid(cls, phone: str, code: str) -> bool:
+        """Is this code currently valid? **Does not consume it.**
+
+        Not named ``check`` — that shadows Django's ``Model.check()`` and breaks the whole
+        system-check framework, which pytest does not run but ``manage.py`` does.
+
+        Split out so a caller can validate the code, discover it cannot finish (no role
+        chosen for a new account), and refuse *without* destroying the caller's only way
+        to retry.
+        """
+        return cls._live_row(phone, code) is not None
+
+    @classmethod
+    def verify_and_consume(cls, phone: str, code: str) -> bool:
+        row = cls._live_row(phone, code)
         if not row:
             return False
-        row.consumed_at = now
+        row.consumed_at = timezone.now()
         row.save(update_fields=["consumed_at"])
         return True
 

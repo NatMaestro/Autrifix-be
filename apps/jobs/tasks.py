@@ -8,7 +8,7 @@ logger = logging.getLogger(__name__)
 
 @shared_task(bind=True, max_retries=3)
 def match_service_request_async(self, service_request_id: str):
-    """Background match — notify mechanics, push to Channels (stub)."""
+    """Background match — notify providers, push to Channels (stub)."""
     from apps.jobs.models import ServiceRequest
 
     try:

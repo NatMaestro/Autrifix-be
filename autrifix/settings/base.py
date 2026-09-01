@@ -17,8 +17,23 @@ env = environ.Env(
     DEBUG=(bool, False),
 )
 
-SECRET_KEY = env("SECRET_KEY", default="dev-only-change-in-production")
 DEBUG = env.bool("DEBUG", default=False)
+
+# No usable default outside DEBUG. Production additionally enforces a 32-character minimum;
+# this stops a non-DEBUG deployment that merely forgot to set the variable from booting with
+# a publicly known key (docs/SECURITY.md SEC-GAP-02).
+_secret_key = env("SECRET_KEY", default="")
+if not _secret_key:
+    if DEBUG:
+        _secret_key = "dev-only-insecure-key-do-not-use-outside-debug"
+    else:
+        from django.core.exceptions import ImproperlyConfigured
+
+        raise ImproperlyConfigured(
+            "SECRET_KEY must be set when DEBUG is False. "
+            "Generate one with: python -c \"import secrets; print(secrets.token_urlsafe(64))\""
+        )
+SECRET_KEY = _secret_key
 ALLOWED_HOSTS = env.list("ALLOWED_HOSTS", default=["localhost", "127.0.0.1"])
 
 DEFAULT_FROM_EMAIL = env("DEFAULT_FROM_EMAIL", default="AutriFix <noreply@localhost>")
@@ -64,9 +79,10 @@ INSTALLED_APPS = [
     "channels",
     *_CLOUDINARY_APPS,
     "apps.core",
+    "apps.administration",
     "apps.accounts",
-    "apps.drivers",
-    "apps.mechanics",
+    "apps.customers",
+    "apps.providers",
     "apps.jobs",
     "apps.reviews",
     "apps.payments",
@@ -126,6 +142,43 @@ MEDIA_ROOT = BASE_DIR / "media"
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 AUTH_USER_MODEL = "accounts.User"
+
+# Ghana cedi. Money is recorded, never processed — settlement is cash between the two
+# parties (ADR-022). The payment *rail* is deliberately unchosen; see SPEC-015.
+PLATFORM_CURRENCY = env("PLATFORM_CURRENCY", default="GHS")
+
+# --- Lifecycle sweeps and volume limits (SPEC-016) ---
+# How long a customer has to confirm the amount before silence is treated as agreement.
+# Long enough that a distracted customer is not surprised; short enough that a provider is
+# not held hostage by one. Run `manage.py sweep_stale_state` from cron to apply it.
+JOB_AUTO_CONFIRM_AFTER = timedelta(hours=env.int("JOB_AUTO_CONFIRM_AFTER_HOURS", default=72))
+
+# How long an unclaimed request stays open. Note the tension with the 30-minute provider
+# feed window: a request is *discoverable* for 30 minutes but stays open far longer, so a
+# customer can be waiting on a request no provider can still see (SPEC-016 OQ-016-B).
+REQUEST_EXPIRES_AFTER = timedelta(hours=env.int("REQUEST_EXPIRES_AFTER_HOURS", default=6))
+
+# Abuse ceilings, not product rules (SEC-GAP-28). Set to 0 to disable either.
+MAX_OPEN_REQUESTS_PER_CUSTOMER = env.int("MAX_OPEN_REQUESTS_PER_CUSTOMER", default=3)
+MAX_CONCURRENT_JOBS_PER_PROVIDER = env.int("MAX_CONCURRENT_JOBS_PER_PROVIDER", default=3)
+
+# Verification level at which a provider sees exact customer coordinates while browsing
+# (SPEC-013 REQ-2). A setting, so the supply-versus-privacy trade can be retuned without a
+# code change: "phone" is more permissive, "documents" is the default.
+PROVIDER_EXACT_LOCATION_MIN_LEVEL = env("PROVIDER_EXACT_LOCATION_MIN_LEVEL", default="documents")
+
+# Verification level required to ACCEPT work (SPEC-013 REQ-3). Unverified providers may still
+# browse — seeing the work they cannot yet take is the intended nudge toward completing
+# verification. This is the marketplace's cold-start dial: "documents" is a hard quality gate
+# but nobody can work until reviewed; "phone" is self-service and instant.
+PROVIDER_MIN_ACCEPT_LEVEL = env("PROVIDER_MIN_ACCEPT_LEVEL", default="documents")
+
+# Issue-router ML model. Local-filesystem persistence is not durable on ephemeral hosts
+# and is not shared between processes — see docs/DECISIONS.md ADR-010.
+ISSUE_ROUTER_MODEL_PATH = env(
+    "ISSUE_ROUTER_MODEL_PATH",
+    default=str(BASE_DIR / "var" / "issue_router_model.json"),
+)
 
 # --- Redis / cache ---
 REDIS_URL = env("REDIS_URL", default="redis://127.0.0.1:6379/0")
@@ -188,6 +241,12 @@ REST_FRAMEWORK = {
         "user": "1000/hour",
         "auth": "30/minute",
         "ai": "20/minute",
+        # Per-targeted-account login limit, independent of the IP-keyed "auth" scope.
+        "login_identifier": "10/minute",
+        # Agency invitations are addressed by phone number and report whether one belongs to
+        # a provider, which makes the endpoint an enumeration oracle for an authenticated
+        # agency admin. Throttled rather than redesigned — see SPEC-017 OQ-017-A.
+        "agency_invite": "20/hour",
     },
     "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
     "EXCEPTION_HANDLER": "apps.core.exceptions.custom_exception_handler",
@@ -205,7 +264,7 @@ SIMPLE_JWT = {
 
 SPECTACULAR_SETTINGS = {
     "TITLE": "AutriFix API",
-    "DESCRIPTION": "Roadside assistance marketplace: drivers, mechanics, real-time jobs. "
+    "DESCRIPTION": "Roadside assistance marketplace: customers, providers, real-time jobs. "
     "MVP auth: `POST /api/v1/auth/register/` with **email** + **phone** + **password**; `POST /api/v1/auth/login/` with **identifier** (email or E.164 phone) + **password**; "
     "`POST /api/v1/auth/google/` with Google **id_token**. "
     "Legacy SMS OTP endpoints remain for future use.",
@@ -214,6 +273,23 @@ SPECTACULAR_SETTINGS = {
     "SCHEMA_PATH_PREFIX": "/api/v1",
     "PREPROCESSING_HOOKS": ["autrifix.openapi.preprocessing_filter_api_v1"],
     "COMPONENT_SPLIT_REQUEST": True,
+    # ``role`` appears with different choice sets (full UserRole vs. the customer/provider
+    # subset offered at signup); name them explicitly so generated clients get stable types.
+    "ENUM_NAME_OVERRIDES": {
+        "UserRoleEnum": "apps.accounts.models.UserRole.choices",
+        "SignupRoleEnum": "apps.accounts.models.SIGNUP_ROLE_CHOICES",
+        "VerificationLevelEnum": "apps.providers.verification.VerificationLevel.choices",
+        # Two `role` fields with different choice sets: `owner` is reachable by promotion
+        # but never by invitation, so the invite enum is deliberately the smaller one.
+        "AgencyRoleEnum": "apps.providers.agencies.AgencyRole.choices",
+        "AgencyInviteRoleEnum": "apps.providers.agency_serializers.INVITABLE_ROLES",
+        # Three different `status` fields now reach the schema (job, service request,
+        # verification submission). Named explicitly so a client gets `JobStatusEnum` rather
+        # than a hash-suffixed placeholder that changes whenever the set does.
+        "JobStatusEnum": "apps.jobs.models.JobStatus.choices",
+        "ServiceRequestStatusEnum": "apps.jobs.models.ServiceRequestStatus.choices",
+        "VerificationSubmissionStatusEnum": "apps.providers.verification.VerificationStatus.choices",
+    },
     "SWAGGER_UI_SETTINGS": {
         "deepLinking": True,
         "displayOperationId": False,

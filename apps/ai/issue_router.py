@@ -14,8 +14,13 @@ from django.db.utils import ProgrammingError
 from apps.jobs.models import ServiceCategory, ServiceRequest
 
 TOKEN_RE = re.compile(r"[a-z0-9]+")
-MODEL_DIR = Path(settings.BASE_DIR) / "var"
-MODEL_PATH = MODEL_DIR / "issue_router_model.json"
+# Overridable so tests (and future non-filesystem backends) do not write to the
+# checked-in model file. See ``docs/DECISIONS.md`` ADR-010 — this path is not durable
+# on any of the project's deployment targets.
+MODEL_PATH = Path(
+    getattr(settings, "ISSUE_ROUTER_MODEL_PATH", Path(settings.BASE_DIR) / "var" / "issue_router_model.json")
+)
+MODEL_DIR = MODEL_PATH.parent
 _MODEL_LOCK = threading.Lock()
 ML_CONFIDENCE_THRESHOLD = 0.58
 
@@ -44,7 +49,7 @@ RULES: dict[str, list[str]] = {
         "knocking",
         "rough idle",
         # Intentionally exclude generic "mechanic" to reduce collisions
-        # with the "general mechanic" bucket.
+        # with the "general-mechanic" category bucket.
     ],
     "tire": [
         "flat",

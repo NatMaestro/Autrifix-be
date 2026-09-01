@@ -1,7 +1,10 @@
 from asgiref.sync import sync_to_async
 from channels.generic.websocket import AsyncJsonWebsocketConsumer
 
-from apps.chat.models import ChatMessage, ChatRoom
+from apps.chat.models import ChatMessage
+from apps.chat.selectors import get_participant_room
+
+MAX_BODY_LENGTH = 4000
 
 
 class JobChatConsumer(AsyncJsonWebsocketConsumer):
@@ -21,7 +24,8 @@ class JobChatConsumer(AsyncJsonWebsocketConsumer):
         await self.accept()
 
     async def disconnect(self, close_code):
-        await self.channel_layer.group_discard(self.group, self.channel_name)
+        if getattr(self, "group", None):
+            await self.channel_layer.group_discard(self.group, self.channel_name)
 
     async def receive_json(self, content, **kwargs):
         kind = str(content.get("kind") or "").strip().lower()
@@ -40,26 +44,26 @@ class JobChatConsumer(AsyncJsonWebsocketConsumer):
             return
         body = str(content.get("body") or "").strip()
         if not body:
+            await self.send_json({"kind": "error", "detail": "body is required"})
+            return
+        if len(body) > MAX_BODY_LENGTH:
+            await self.send_json(
+                {"kind": "error", "detail": f"body must be {MAX_BODY_LENGTH} characters or fewer"}
+            )
             return
         payload = await self._create_message_payload(body)
-        await self.channel_layer.group_send(self.group, {"type": "chat.message", "message": payload})
+        # Same envelope the REST path publishes, so clients parse one shape.
+        await self.channel_layer.group_send(
+            self.group,
+            {"type": "chat.message", "message": {"kind": "chat.message", "data": payload}},
+        )
 
     async def chat_message(self, event):
         await self.send_json(event["message"])
 
     @sync_to_async
     def _get_room_for_user(self):
-        user = self.scope["user"]
-        try:
-            room = ChatRoom.objects.select_related(
-                "job__mechanic__user",
-                "job__service_request__driver__user",
-            ).get(job_id=self.job_id)
-        except ChatRoom.DoesNotExist:
-            return None
-        is_driver = room.job.service_request.driver.user_id == user.id
-        is_mechanic = room.job.mechanic.user_id == user.id
-        return room if (is_driver or is_mechanic) else None
+        return get_participant_room(self.scope["user"], self.job_id)
 
     @sync_to_async
     def _create_message_payload(self, body: str):

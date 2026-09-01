@@ -9,24 +9,24 @@ class IsAdmin(BasePermission):
         return bool(u and u.is_authenticated and (u.is_superuser or getattr(u, "role", None) == UserRole.ADMIN))
 
 
-class IsDriver(BasePermission):
+class IsCustomer(BasePermission):
     def has_permission(self, request, view):
         u = request.user
-        return bool(u and u.is_authenticated and getattr(u, "role", None) == UserRole.DRIVER)
+        return bool(u and u.is_authenticated and getattr(u, "role", None) == UserRole.CUSTOMER)
 
 
-class IsMechanic(BasePermission):
+class IsProvider(BasePermission):
     def has_permission(self, request, view):
         u = request.user
-        return bool(u and u.is_authenticated and getattr(u, "role", None) == UserRole.MECHANIC)
+        return bool(u and u.is_authenticated and getattr(u, "role", None) == UserRole.PROVIDER)
 
 
-class IsDriverOrMechanic(BasePermission):
+class IsCustomerOrProvider(BasePermission):
     def has_permission(self, request, view):
         u = request.user
         if not u or not u.is_authenticated:
             return False
-        return getattr(u, "role", None) in (UserRole.DRIVER, UserRole.MECHANIC)
+        return getattr(u, "role", None) in (UserRole.CUSTOMER, UserRole.PROVIDER)
 
 
 class ReadOnlyUnlessAdmin(BasePermission):
