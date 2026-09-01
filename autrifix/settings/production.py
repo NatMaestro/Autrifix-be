@@ -59,6 +59,7 @@ REST_FRAMEWORK["DEFAULT_THROTTLE_RATES"] = {
     "user": env("THROTTLE_USER", default="500/hour"),
     "auth": env("THROTTLE_AUTH", default="20/minute"),
     "ai": env("THROTTLE_AI", default="10/minute"),
+    "login_identifier": env("THROTTLE_LOGIN_IDENTIFIER", default="5/minute"),
 }
 
 # JSON logs in production (optional: ship to Datadog / CloudWatch)

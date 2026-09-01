@@ -12,7 +12,16 @@ defaults:
 
 jobs:
   test:
+    # SQLite runs the whole suite fast; PostgreSQL additionally exercises the layers
+    # SQLite cannot — SELECT ... FOR UPDATE is a silent no-op there, so the concurrent
+    # acceptance test only runs on the postgres leg.
+    name: tests (${{ matrix.backend }})
     runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: [sqlite, postgres]
 
     services:
       postgres:
@@ -65,8 +74,18 @@ jobs:
           echo "CELERY_RESULT_BACKEND=redis://localhost:6379/2" >> $GITHUB_ENV
           echo "ALLOWED_HOSTS=localhost,127.0.0.1" >> $GITHUB_ENV
 
+      - name: Select database backend
+        if: matrix.backend == 'postgres'
+        run: echo "USE_POSTGRES_TESTS=1" >> $GITHUB_ENV
+
+      - name: Check for missing migrations
+        run: python manage.py makemigrations --check --dry-run
+
       - name: Migrate
         run: python manage.py migrate --noinput
 
+      - name: Validate OpenAPI schema
+        run: python manage.py spectacular --fail-on-warn --file /dev/null
+
       - name: Run tests
-        run: pytest --cov=apps --cov-report=term-missing --cov-fail-under=0 -v
+        run: pytest --cov=apps --cov-report=term-missing --cov-fail-under=70 -ra -v

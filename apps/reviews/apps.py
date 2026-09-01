@@ -5,3 +5,6 @@ class ReviewsConfig(AppConfig):
     default_auto_field = "django.db.models.BigAutoField"
     name = "apps.reviews"
     label = "reviews"
+
+    def ready(self):
+        from apps.reviews import signals  # noqa: F401

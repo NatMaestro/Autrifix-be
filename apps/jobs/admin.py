@@ -14,11 +14,11 @@ class ServiceCategoryAdmin(admin.ModelAdmin):
 
 @admin.register(ServiceRequest)
 class ServiceRequestAdmin(admin.ModelAdmin):
-    list_display = ("id", "driver", "category", "status", "created_at")
+    list_display = ("id", "customer", "category", "status", "created_at")
     list_filter = ("status", "category")
 
 
 @admin.register(Job)
 class JobAdmin(admin.ModelAdmin):
-    list_display = ("id", "service_request", "mechanic", "status", "created_at")
+    list_display = ("id", "service_request", "provider", "status", "created_at")
     list_filter = ("status",)

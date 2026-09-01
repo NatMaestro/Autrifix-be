@@ -19,5 +19,10 @@ def issue_otp(phone: str) -> str:
     return code
 
 
+def check_otp(phone: str, code: str) -> bool:
+    """Validate without consuming — see ``PhoneOTP.is_code_valid``."""
+    return PhoneOTP.is_code_valid(phone, code)
+
+
 def verify_otp(phone: str, code: str) -> bool:
     return PhoneOTP.verify_and_consume(phone, code)

@@ -4,12 +4,13 @@ from django.conf import settings
 from drf_spectacular.utils import extend_schema, inline_serializer
 from rest_framework import generics, permissions, serializers, status
 from rest_framework.response import Response
+from rest_framework.throttling import AnonRateThrottle, ScopedRateThrottle
 from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.views import TokenBlacklistView, TokenObtainPairView, TokenRefreshView
 
-from apps.accounts.models import User, UserRole
-from apps.accounts.otp_service import issue_otp, verify_otp as verify_otp_code
+from apps.accounts.models import SIGNUP_ROLE_CHOICES, User, UserRole
+from apps.accounts.otp_service import check_otp, issue_otp, verify_otp as verify_otp_code
 from apps.accounts.phone import normalize_phone
 from apps.accounts.serializers import (
     GoogleAuthSerializer,
@@ -20,10 +21,17 @@ from apps.accounts.serializers import (
     VerifyOTPSerializer,
 )
 from apps.accounts.sms import send_otp_sms
-from apps.drivers.models import DriverProfile
-from apps.mechanics.models import MechanicProfile
+from apps.accounts.throttling import LoginIdentifierRateThrottle
+from apps.core.exceptions import Conflict
+from apps.customers.models import CustomerProfile
+from apps.providers.models import ProviderProfile
+from apps.providers.verification import evaluate_automatic_level
 
 logger = logging.getLogger(__name__)
+
+#: Overriding ``throttle_classes`` replaces the project defaults, so the scoped and
+#: anonymous throttles are re-listed alongside the per-identifier one.
+LOGIN_THROTTLES = (LoginIdentifierRateThrottle, ScopedRateThrottle, AnonRateThrottle)
 
 _LOGIN_REQ = inline_serializer(
     name="LoginIdentifierRequest",
@@ -51,10 +59,15 @@ _LOGIN_REQ = inline_serializer(
     tags=["auth"],
 )
 class LoginView(TokenObtainPairView):
-    """Always use identifier-based serializer (not SimpleJWT default ``phone`` + password)."""
+    """Always use identifier-based serializer (not SimpleJWT default ``phone`` + password).
+
+    Throttled twice over: the IP-keyed ``auth`` scope, and a per-identifier limit so an
+    attacker cannot grind one account from many addresses (``docs/SECURITY.md`` SEC-GAP-01).
+    """
 
     serializer_class = IdentifierTokenObtainPairSerializer
     throttle_scope = "auth"
+    throttle_classes = LOGIN_THROTTLES
 
     def get_serializer_class(self):
         return IdentifierTokenObtainPairSerializer
@@ -64,6 +77,7 @@ class LoginView(TokenObtainPairView):
 class TokenObtainPairAliasView(TokenObtainPairView):
     serializer_class = IdentifierTokenObtainPairSerializer
     throttle_scope = "auth"
+    throttle_classes = LOGIN_THROTTLES
 
     def get_serializer_class(self):
         return IdentifierTokenObtainPairSerializer
@@ -143,11 +157,29 @@ class SendOTPView(APIView):
         )
 
 
+#: Machine-readable marker for "this would create an account, but no role was chosen".
+#: Deliberately **not** a 409: clients already treat 409 as "someone got there first"
+#: (job taken, request expired, cap reached), and this is a retryable missing-input case.
+SIGNUP_ROLE_REQUIRED = "signup_role_required"
+
+
+def signup_role_required_response():
+    """Ask the client to choose a role and retry, rather than choosing one for them."""
+    return Response(
+        {
+            "detail": "No account exists for this identity. Choose a role to finish signing up.",
+            "code": SIGNUP_ROLE_REQUIRED,
+            "choices": [value for value, _label in SIGNUP_ROLE_CHOICES],
+        },
+        status=status.HTTP_400_BAD_REQUEST,
+    )
+
+
 @extend_schema(
     summary="Verify OTP",
     description=(
         "Verify the SMS code. **Creates** a user on first success (passwordless) or logs in an existing user. "
-        "Optional **role** (`driver` | `mechanic`) applies only when the account is created."
+        "Optional **role** (`customer` | `provider`) applies only when the account is created."
     ),
     request=VerifyOTPSerializer,
     responses={
@@ -175,25 +207,43 @@ class VerifyOTPView(APIView):
         code = ser.validated_data["code"]
         role_raw = ser.validated_data.get("role")
 
-        if not verify_otp_code(phone, code):
+        # Checked before anything that depends on whether the account exists, so this
+        # endpoint never confirms a phone number to someone without a valid code.
+        if not check_otp(phone, code):
             return Response(
                 {"detail": "Invalid or expired code."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        role = UserRole.DRIVER
-        if role_raw == "mechanic":
-            role = UserRole.MECHANIC
-        elif role_raw == "driver":
-            role = UserRole.DRIVER
+        user = User.objects.filter(phone=phone).first()
+        if user is None and not role_raw:
+            # Same rule as Google: never invent a permanent role for a new account. The
+            # code is deliberately still unconsumed, so retrying with a role works.
+            return signup_role_required_response()
 
-        user, created = User.objects.get_or_create(
-            phone=phone,
-            defaults={"email": None, "role": role},
-        )
+        if not verify_otp_code(phone, code):
+            # Lost a race with a concurrent use of the same code.
+            return Response(
+                {"detail": "Invalid or expired code."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        created = False
+        if user is None:
+            user = User.objects.create(
+                phone=phone,
+                email=None,
+                role=UserRole.PROVIDER if role_raw == "provider" else UserRole.CUSTOMER,
+                is_phone_verified=True,
+            )
+            created = True
         if created:
             user.set_unusable_password()
             user.save(update_fields=["password"])
+        elif not user.is_phone_verified:
+            # Consuming a code proves control of the number, however the account was made.
+            user.is_phone_verified = True
+            user.save(update_fields=["is_phone_verified"])
 
         refresh = RefreshToken.for_user(user)
         return Response(
@@ -209,7 +259,7 @@ _GOOGLE_REQ = inline_serializer(
     name="GoogleAuthRequest",
     fields={
         "id_token": serializers.CharField(help_text="Credential JWT from Google Identity Services"),
-        "role": serializers.ChoiceField(choices=["driver", "mechanic"], required=False),
+        "role": serializers.ChoiceField(choices=SIGNUP_ROLE_CHOICES, required=False),
     },
 )
 _GOOGLE_OK = inline_serializer(
@@ -242,7 +292,7 @@ class GoogleAuthView(APIView):
         ser = GoogleAuthSerializer(data=request.data)
         ser.is_valid(raise_exception=True)
         raw = ser.validated_data["id_token"]
-        selected_role = ser.validated_data.get("role") or UserRole.DRIVER
+        selected_role = ser.validated_data.get("role")
         try:
             from google.auth.transport import requests as google_requests
             from google.oauth2 import id_token as google_id_token
@@ -269,6 +319,11 @@ class GoogleAuthView(APIView):
         verified = bool(idinfo.get("email_verified"))
         user = User.objects.filter(email__iexact=email).first()
         if user is None:
+            # Creating an account requires an explicit role. Defaulting here would decide
+            # something permanent (ADR-013) on the user's behalf, which is how providers
+            # ended up stranded in the customer app (SPEC-001 REQ-9).
+            if not selected_role:
+                return signup_role_required_response()
             user = User.objects.create_user(
                 phone=None,
                 password=None,
@@ -280,12 +335,12 @@ class GoogleAuthView(APIView):
             user.is_email_verified = True
             user.save(update_fields=["is_email_verified"])
 
-        if user.role == UserRole.DRIVER:
-            DriverProfile.objects.get_or_create(user=user)
-        elif user.role == UserRole.MECHANIC:
-            MechanicProfile.objects.get_or_create(
+        if user.role == UserRole.CUSTOMER:
+            CustomerProfile.objects.get_or_create(user=user)
+        elif user.role == UserRole.PROVIDER:
+            ProviderProfile.objects.get_or_create(
                 user=user,
-                defaults={"business_name": user.email or "AutriFix Mechanic"},
+                defaults={"business_name": user.email or "AutriFix Provider"},
             )
 
         refresh = RefreshToken.for_user(user)
@@ -302,7 +357,7 @@ _REG_REQ = inline_serializer(
         "phone": serializers.CharField(help_text="E.164 or local GH number"),
         "password": serializers.CharField(),
         "password_confirm": serializers.CharField(),
-        "role": serializers.ChoiceField(choices=["driver", "mechanic"], required=False),
+        "role": serializers.ChoiceField(choices=SIGNUP_ROLE_CHOICES, required=False),
     },
 )
 
@@ -339,6 +394,51 @@ class MeView(generics.RetrieveUpdateAPIView):
 
     def get_object(self):
         return self.request.user
+
+
+@extend_schema(
+    summary="Verify my phone number",
+    description=(
+        "Confirm the code sent by `POST /auth/send-otp/` for this account's phone number. "
+        "Registration collects a phone but does not verify it."
+    ),
+    request=inline_serializer(
+        name="VerifyPhoneRequest", fields={"code": serializers.CharField(min_length=6, max_length=6)}
+    ),
+    responses={
+        200: inline_serializer(
+            name="VerifyPhoneResponse", fields={"is_phone_verified": serializers.BooleanField()}
+        )
+    },
+    tags=["auth"],
+)
+class VerifyMyPhoneView(APIView):
+    """Self-service phone verification for an already-authenticated user (SPEC-013 REQ-5)."""
+
+    throttle_scope = "auth"
+
+    def post(self, request):
+        user = request.user
+        if not user.phone:
+            raise Conflict("This account has no phone number to verify.")
+        if user.is_phone_verified:
+            return Response({"is_phone_verified": True}, status=status.HTTP_200_OK)
+
+        code = str(request.data.get("code") or "").strip()
+        if not code:
+            return Response({"detail": "code is required."}, status=status.HTTP_400_BAD_REQUEST)
+        if not verify_otp_code(user.phone, code):
+            raise Conflict("Invalid or expired code.")
+
+        user.is_phone_verified = True
+        user.save(update_fields=["is_phone_verified"])
+
+        # A provider may now qualify for the `phone` level (SPEC-013 REQ-1).
+        provider = ProviderProfile.objects.filter(user=user).first()
+        if provider is not None:
+            evaluate_automatic_level(provider)
+
+        return Response({"is_phone_verified": True}, status=status.HTTP_200_OK)
 
 
 @extend_schema(

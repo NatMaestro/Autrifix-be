@@ -5,5 +5,5 @@ from .models import Payment
 
 @admin.register(Payment)
 class PaymentAdmin(admin.ModelAdmin):
-    list_display = ("id", "job", "amount_cents", "currency", "escrow_status", "created_at")
-    list_filter = ("escrow_status", "currency")
+    list_display = ("id", "job", "amount_minor", "currency", "escrow_status", "rail", "created_at")
+    list_filter = ("escrow_status", "currency", "rail")

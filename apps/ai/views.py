@@ -1,12 +1,13 @@
 import logging
 
+from django.core.exceptions import ValidationError
 from rest_framework import permissions, serializers, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from drf_spectacular.utils import extend_schema, inline_serializer
 
 from apps.ai.issue_router import route_issue
-from apps.ai.matching import score_mechanics_for_request
+from apps.ai.matching import score_providers_for_request
 
 logger = logging.getLogger(__name__)
 
@@ -42,11 +43,18 @@ class DiagnosticsView(APIView):
     permission_classes = (permissions.IsAuthenticated,)
     throttle_scope = "ai"
 
+    MAX_SYMPTOMS = 2000
+
     def post(self, request):
         symptoms = (request.data.get("symptoms") or "").strip()
         if not symptoms:
             return Response(
                 {"detail": "symptoms is required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if len(symptoms) > self.MAX_SYMPTOMS:
+            return Response(
+                {"detail": f"symptoms must be {self.MAX_SYMPTOMS} characters or fewer."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
         # Placeholder — wire OpenAI / Vertex here
@@ -85,27 +93,37 @@ _MATCH_PREVIEW_REQUEST = inline_serializer(
             name="MatchingPreviewResponse",
             fields={
                 "service_request_id": serializers.CharField(),
-                "ranked_mechanics": serializers.ListField(child=serializers.DictField()),
+                "ranked_providers": serializers.ListField(child=serializers.DictField()),
             },
         )
     },
     tags=["ai"],
 )
 class MatchingPreviewView(APIView):
-    """Optimization hook: rank mechanics for a service request (admin / internal)."""
+    """Rank providers for a service request.
+
+    Scoped to the request's own customer (or staff). It previously accepted any
+    ``service_request_id`` from any authenticated user and returned nearby providers for
+    it (``specs/006-matching-discovery.md`` SECGAP-006-3).
+    """
 
     permission_classes = (permissions.IsAuthenticated,)
+    throttle_scope = "ai"
 
     def post(self, request):
         from apps.jobs.models import ServiceRequest
 
         rid = request.data.get("service_request_id")
+        qs = ServiceRequest.objects.select_related("category")
+        if not request.user.is_staff:
+            qs = qs.filter(customer__user=request.user)
         try:
-            sr = ServiceRequest.objects.select_related("category").get(id=rid)
-        except (ServiceRequest.DoesNotExist, TypeError, ValueError):
+            sr = qs.get(id=rid)
+        except (ServiceRequest.DoesNotExist, TypeError, ValueError, ValidationError):
+            # Same response whether the id is malformed, absent, or not the caller's.
             return Response({"detail": "Invalid service_request_id."}, status=400)
-        ranked = score_mechanics_for_request(sr)
-        return Response({"service_request_id": str(sr.id), "ranked_mechanics": ranked})
+        ranked = score_providers_for_request(sr)
+        return Response({"service_request_id": str(sr.id), "ranked_providers": ranked})
 
 
 _ISSUE_ROUTE_REQUEST = inline_serializer(
@@ -134,9 +152,17 @@ class IssueRouteView(APIView):
     """Hybrid issue routing (rules + incremental ML)."""
 
     permission_classes = (permissions.IsAuthenticated,)
+    throttle_scope = "ai"
+
+    MAX_ISSUE_TEXT = 2000
 
     def post(self, request):
         issue_text = (request.data.get("issue_text") or "").strip()
         if not issue_text:
             return Response({"detail": "issue_text is required."}, status=status.HTTP_400_BAD_REQUEST)
+        if len(issue_text) > self.MAX_ISSUE_TEXT:
+            return Response(
+                {"detail": f"issue_text must be {self.MAX_ISSUE_TEXT} characters or fewer."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         return Response(route_issue(issue_text))

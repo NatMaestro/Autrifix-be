@@ -1,11 +1,10 @@
 from django.contrib.auth.password_validation import validate_password
 from rest_framework import serializers
 from rest_framework.exceptions import AuthenticationFailed
-from rest_framework_simplejwt.settings import api_settings as jwt_api_settings
 from rest_framework_simplejwt.tokens import RefreshToken
 
 from apps.accounts.auth_utils import user_for_identifier
-from apps.accounts.models import User, UserRole
+from apps.accounts.models import SIGNUP_ROLE_CHOICES, User, UserRole
 from apps.accounts.phone import normalize_phone
 
 
@@ -17,9 +16,9 @@ class VerifyOTPSerializer(serializers.Serializer):
     phone = serializers.CharField(max_length=32)
     code = serializers.CharField(min_length=6, max_length=6, trim_whitespace=True)
     role = serializers.ChoiceField(
-        choices=["driver", "mechanic"],
+        choices=SIGNUP_ROLE_CHOICES,
         required=False,
-        help_text="Set on first login when the account is created (default: driver).",
+        help_text="Set on first login when the account is created (default: customer).",
     )
 
 
@@ -34,6 +33,30 @@ class IdentifierTokenObtainPairSerializer(serializers.Serializer):
     phone = serializers.CharField(required=False, allow_blank=True, max_length=32)
     password = serializers.CharField(write_only=True, trim_whitespace=False)
 
+    #: Deliberately identical for "no such user", "wrong password", and "inactive", so
+    #: the endpoint cannot be used to enumerate accounts.
+    NO_ACTIVE_ACCOUNT = "No active account found with the given credentials"
+
+    def _audit_failure(self, identifier: str, user, *, reason: str) -> None:
+        """Record the attempt. The response stays identical either way — only the audit
+        trail distinguishes 'no such account' from 'wrong password'."""
+        from apps.core import audit
+        from apps.core.models import AuditAction
+
+        request = self.context.get("request")
+        audit.record(
+            AuditAction.LOGIN_FAILED,
+            actor=None,  # the attempt is unauthenticated by definition
+            target_type="user",
+            target_id=getattr(user, "pk", "") or "",
+            metadata={
+                "identifier": identifier[:254],
+                "reason": reason,
+                "account_exists": user is not None,
+                "ip": audit.client_ip(request),
+            },
+        )
+
     def validate(self, attrs):
         ident = (
             (attrs.get("identifier") or "").strip()
@@ -47,15 +70,11 @@ class IdentifierTokenObtainPairSerializer(serializers.Serializer):
             )
         user = user_for_identifier(ident)
         if user is None or not user.has_usable_password() or not user.check_password(attrs["password"]):
-            raise AuthenticationFailed(
-                jwt_api_settings.NO_ACTIVE_ACCOUNT_FOUND,
-                code="no_active_account",
-            )
+            self._audit_failure(ident, user, reason="bad_credentials")
+            raise AuthenticationFailed(self.NO_ACTIVE_ACCOUNT, code="no_active_account")
         if not user.is_active:
-            raise AuthenticationFailed(
-                jwt_api_settings.NO_ACTIVE_ACCOUNT_FOUND,
-                code="no_active_account",
-            )
+            self._audit_failure(ident, user, reason="inactive_account")
+            raise AuthenticationFailed(self.NO_ACTIVE_ACCOUNT, code="no_active_account")
 
         refresh = RefreshToken.for_user(user)
         return {"refresh": str(refresh), "access": str(refresh.access_token)}
@@ -68,10 +87,7 @@ class RegisterSerializer(serializers.Serializer):
     phone = serializers.CharField(max_length=32)
     password = serializers.CharField(write_only=True, min_length=8)
     password_confirm = serializers.CharField(write_only=True, min_length=8)
-    role = serializers.ChoiceField(
-        choices=[c for c in UserRole.choices if c[0] != UserRole.ADMIN],
-        default=UserRole.DRIVER,
-    )
+    role = serializers.ChoiceField(choices=SIGNUP_ROLE_CHOICES, default=UserRole.CUSTOMER)
 
     def validate_password(self, value):
         validate_password(value)
@@ -101,7 +117,7 @@ class RegisterSerializer(serializers.Serializer):
 
     def create(self, validated_data):
         pwd = validated_data["password"]
-        role = validated_data.get("role", UserRole.DRIVER)
+        role = validated_data.get("role", UserRole.CUSTOMER)
         user = User(
             email=validated_data["email"],
             phone=validated_data["phone"],
@@ -115,14 +131,19 @@ class RegisterSerializer(serializers.Serializer):
 class GoogleAuthSerializer(serializers.Serializer):
     id_token = serializers.CharField()
     role = serializers.ChoiceField(
-        choices=[UserRole.DRIVER, UserRole.MECHANIC],
+        choices=SIGNUP_ROLE_CHOICES,
         required=False,
-        help_text="Optional role for first-time Google signup (driver or mechanic).",
+        help_text="Optional role for first-time Google signup (customer or provider).",
     )
 
 
 class UserSerializer(serializers.ModelSerializer):
-    """Profile updates — identifier used at signup stays read-only here."""
+    """Profile updates — identifier and role used at signup stay read-only here.
+
+    ``role`` is deliberately read-only: it decides which endpoints the account may reach
+    (including accepting jobs), so it is not a self-service field. Changing it requires
+    an administrator. See ``specs/001-authentication.md`` REQ-9.
+    """
 
     class Meta:
         model = User
@@ -137,9 +158,16 @@ class UserSerializer(serializers.ModelSerializer):
             "is_email_verified",
             "date_joined",
         )
-        read_only_fields = ("id", "phone", "is_email_verified", "date_joined")
+        read_only_fields = ("id", "phone", "role", "is_email_verified", "date_joined")
 
-    def validate_role(self, value):
-        if value == UserRole.ADMIN:
-            raise serializers.ValidationError("Cannot set role to admin.")
-        return value
+    def validate_email(self, value):
+        """Match the case-insensitive lookup used by login (``auth_utils``)."""
+        raw = (value or "").strip().lower()
+        if not raw:
+            return None
+        qs = User.objects.filter(email__iexact=raw)
+        if self.instance is not None:
+            qs = qs.exclude(pk=self.instance.pk)
+        if qs.exists():
+            raise serializers.ValidationError("An account with this email already exists.")
+        return raw
